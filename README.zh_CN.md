@@ -95,7 +95,7 @@ C:\Users\<你>\.codex\logs_*.sqlite
 
 ## 快速开始
 
-1. 从 GitHub Releases 下载 `CodexSiteLauncher.exe`。
+1. 下载 [`CodexSiteLauncher.exe`](./dist/CodexSiteLauncher.exe)。
 2. 切换站点前，先完全退出 Codex Desktop。
 3. 打开 `CodexSiteLauncher.exe`。
 4. 选择一个站点。
@@ -129,7 +129,7 @@ C:\Users\<你>\.codex\logs_*.sqlite
 
 - 不要提交或公开 API Key。
 - 不要上传个人 `.codex` 目录。
-- `CodexSiteLauncher.exe` 不建议直接提交进 git，推荐放到 GitHub Releases。
+- 当前可执行文件放在 `dist/` 目录，方便直接下载。正式分发时仍推荐使用 GitHub Releases。
 - Windows 商店 / MSIX 应用位于 `C:\Program Files\WindowsApps`，不建议为了启动 Codex 去修改该目录权限。
 
 ---
@@ -137,4 +137,3 @@ C:\Users\<你>\.codex\logs_*.sqlite
 ## 许可证
 
 目前还没有选择许可证。若要接受外部贡献，建议后续补充开源许可证。
-

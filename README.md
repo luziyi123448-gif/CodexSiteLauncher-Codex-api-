@@ -95,7 +95,7 @@ C:\Users\<you>\.codex\logs_*.sqlite
 
 ## Quick Start
 
-1. Download `CodexSiteLauncher.exe` from the latest release.
+1. Download [`CodexSiteLauncher.exe`](./dist/CodexSiteLauncher.exe).
 2. Fully quit Codex Desktop before switching providers.
 3. Run `CodexSiteLauncher.exe`.
 4. Select a provider.
@@ -129,7 +129,7 @@ The project is a single-file C# WinForms app and can be built with the .NET Fram
 
 - Do not commit or publish API keys.
 - Do not upload your personal `.codex` directory.
-- The executable is intentionally not tracked in git; release binaries should be uploaded under GitHub Releases.
+- The current executable is provided under `dist/` for convenient direct download. For formal distribution, GitHub Releases is still recommended.
 - Windows Store/MSIX apps live under `C:\Program Files\WindowsApps`; do not change ownership of that folder just to launch Codex.
 
 ---
@@ -137,4 +137,3 @@ The project is a single-file C# WinForms app and can be built with the .NET Fram
 ## License
 
 No license has been selected yet. Add one before accepting external contributions.
-
