@@ -42,6 +42,8 @@ Windows 商店 / MSIX 版 Codex Desktop 不能像普通 exe 那样稳定接收�
 | 保护对话记录 | 不修改 Codex 的 sessions、sqlite 数据库或历史索引。 |
 | 临时配置切换 | 启动前临时改 `config.toml`，启动后自动恢复。 |
 | 配置备份 | 保留启动器初始对照和上一次启动前配置。 |
+| 容错恢复 | 如果 Codex 启动时也改了 `config.toml`，会只恢复启动器改过的字段并保留其它变更。 |
+| 诊断日志 | 内置日志文件和“打开日志”按钮，方便排查启动或恢复问题。 |
 | 支持商店版 Codex | 通过 Windows 应用激活方式启动，不需要进入 `WindowsApps`。 |
 | API Key 管理 | 将 API Key 保存到 Windows 用户环境变量。 |
 | 深色界面 | 深色 WinForms 界面，支持站点管理和筛选。 |
@@ -74,6 +76,8 @@ Windows 商店 / MSIX 版 Codex Desktop 不能像普通 exe 那样稳定接收�
 3. 通过 Windows 正常应用激活路径启动 Codex Desktop。
 4. 等待一小段时间后恢复启动前的 `config.toml`。
 
+如果 Codex Desktop 在启动期间也写入了 `config.toml`，启动器会优先恢复自己改过的 `model_provider`、`model_providers.newapi` 和 `[windows]` 配置块，同时尽量保留 Codex 写入的其它内容。
+
 启动器会保留这些对照备份：
 
 ```text
@@ -104,6 +108,12 @@ C:\Users\<你>\.codex\logs_*.sqlite
 7. 点击对应站点的启动按钮。
 
 如果只是想测试能不能打开 Codex，点击 **纯净启动测试**。这个按钮不会改配置。
+
+如果启动失败、恢复失败或行为异常，点击 **打开日志**。日志位于：
+
+```text
+%APPDATA%\CodexSiteLauncher\launcher.log
+```
 
 ---
 

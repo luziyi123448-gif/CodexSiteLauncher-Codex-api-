@@ -6,3 +6,5 @@
 bin/
 obj/
 .vs/
+codex-history-repair-backup-*/
+tmp-history-sync-verify/

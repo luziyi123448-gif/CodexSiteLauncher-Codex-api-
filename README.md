@@ -42,6 +42,8 @@ It was built for the Windows Store/MSIX version of Codex Desktop, where launchin
 | Conversation-safe | Does not touch Codex session files, SQLite databases, or conversation history. |
 | Temporary config switch | Temporarily edits `config.toml`, launches Codex, then restores the previous config. |
 | Backups | Keeps launcher baseline and last-before-launch config backups for comparison. |
+| Resilient restore | If Codex also edits `config.toml` during startup, restores only launcher-owned fields and preserves other changes. |
+| Diagnostics log | Includes a log file and an **Open Log** button for startup and restore troubleshooting. |
 | Windows Store/MSIX support | Starts Codex Desktop through the app activation path instead of directly opening `WindowsApps`. |
 | API key management | Saves API keys into Windows User environment variables. |
 | Dark UI | Dark WinForms interface with built-in site management. |
@@ -74,6 +76,8 @@ When launching a provider, the app:
 3. Starts Codex Desktop through the normal Windows application activation path.
 4. Restores the previous `config.toml` after a short delay.
 
+If Codex Desktop also writes to `config.toml` during startup, the launcher restores its own `model_provider`, `model_providers.newapi`, and `[windows]` changes while preserving unrelated Codex changes where possible.
+
 Backups are stored at:
 
 ```text
@@ -104,6 +108,12 @@ C:\Users\<you>\.codex\logs_*.sqlite
 7. Click the provider launch button.
 
 Use **Clean Launch Test** to verify that Codex Desktop can be opened without changing any provider configuration.
+
+If launch or restore behavior needs troubleshooting, click **Open Log**. The log is stored at:
+
+```text
+%APPDATA%\CodexSiteLauncher\launcher.log
+```
 
 ---
 
