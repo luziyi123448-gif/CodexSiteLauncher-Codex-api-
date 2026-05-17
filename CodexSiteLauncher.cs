@@ -166,6 +166,13 @@ namespace CodexSiteLauncher
         public int Archived { get; set; }
     }
 
+    internal sealed class SessionIndexRecord
+    {
+        public string Id { get; set; }
+        public Dictionary<string, object> Data { get; set; }
+        public string RawLine { get; set; }
+    }
+
     internal class HistorySyncEstimate
     {
         public string SourceProvider { get; set; }
@@ -185,6 +192,7 @@ namespace CodexSiteLauncher
         public string StateWalBackupPath { get; set; }
         public string SessionIndexBackupPath { get; set; }
         public string GlobalStateBackupPath { get; set; }
+        public int SessionIndexSyncedCount { get; set; }
     }
 
     internal static class SQLiteNative
@@ -1568,7 +1576,7 @@ namespace CodexSiteLauncher
                 }
 
                 HistorySyncEstimate estimate = EstimateHistorySync(sourceProvider, targetProvider);
-                if (estimate.CopyCount <= 0)
+                if (estimate.CopyCount <= 0 && estimate.ExistingCopies <= 0)
                 {
                     statusLabel.Text = "没有需要复制的 " + sourceProvider + " 历史记录。";
                     MessageBox.Show(
@@ -1583,14 +1591,21 @@ namespace CodexSiteLauncher
                     return;
                 }
 
+                string confirmText = estimate.CopyCount > 0
+                    ? "将复制 " + estimate.CopyCount + " 条历史记录：" + Environment.NewLine +
+                        sourceProvider + " -> " + targetProvider + Environment.NewLine + Environment.NewLine +
+                        "预计新增空间：" + FormatBytes(estimate.CopyBytes) + Environment.NewLine +
+                        "已存在副本：" + estimate.ExistingCopies + Environment.NewLine +
+                        "缺失会话文件：" + estimate.MissingFiles + Environment.NewLine + Environment.NewLine +
+                        "会先备份 state_*.sqlite 和 session_index.jsonl，并同步完整索引元数据。同步前建议完全退出 Codex。"
+                    : "没有新的历史记录需要复制。" + Environment.NewLine +
+                        "可以刷新 " + estimate.ExistingCopies + " 条已有副本的完整索引元数据，让排序、标题和归档状态与来源一致。" +
+                        Environment.NewLine + Environment.NewLine +
+                        "会先备份 state_*.sqlite 和 session_index.jsonl。同步前建议完全退出 Codex。";
+
                 DialogResult result = MessageBox.Show(
                     this,
-                    "将复制 " + estimate.CopyCount + " 条历史记录：" + Environment.NewLine +
-                    sourceProvider + " -> " + targetProvider + Environment.NewLine + Environment.NewLine +
-                    "预计新增空间：" + FormatBytes(estimate.CopyBytes) + Environment.NewLine +
-                    "已存在副本：" + estimate.ExistingCopies + Environment.NewLine +
-                    "缺失会话文件：" + estimate.MissingFiles + Environment.NewLine + Environment.NewLine +
-                    "会先备份 state_*.sqlite 和 session_index.jsonl。同步前建议完全退出 Codex。",
+                    confirmText,
                     "确认历史同步",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question);
@@ -1603,11 +1618,13 @@ namespace CodexSiteLauncher
 
                 HistorySyncResult sync = CopyHistoryProvider(sourceProvider, targetProvider);
                 statusLabel.Text = "历史同步完成：" + sourceProvider + " -> " + targetProvider +
-                    "，复制 " + sync.CopiedCount + " 条，新增约 " + FormatBytes(sync.CopyBytes) + "。";
+                    "，复制 " + sync.CopiedCount + " 条，刷新索引 " + sync.SessionIndexSyncedCount +
+                    " 条，新增约 " + FormatBytes(sync.CopyBytes) + "。";
                 MessageBox.Show(
                     this,
                     "历史同步完成。" + Environment.NewLine +
                     "复制记录：" + sync.CopiedCount + Environment.NewLine +
+                    "刷新索引：" + sync.SessionIndexSyncedCount + Environment.NewLine +
                     "新增空间：" + FormatBytes(sync.CopyBytes) + Environment.NewLine +
                     "SQLite 备份：" + sync.StateBackupPath,
                     "历史同步",
@@ -1771,7 +1788,6 @@ namespace CodexSiteLauncher
             }
 
             var copiedFiles = new List<string>();
-            var indexLines = new List<string>();
             var createdEntries = new List<HistorySyncEntry>();
 
             using (var db = new SQLiteDatabase(estimate.StateDbPath))
@@ -1828,7 +1844,6 @@ namespace CodexSiteLauncher
                         store.Entries.Add(entry);
                         createdEntries.Add(entry);
 
-                        indexLines.Add(BuildSessionIndexLine(newId, row.Title, row.UpdatedAt));
                         result.CopiedCount++;
                     }
 
@@ -1854,9 +1869,9 @@ namespace CodexSiteLauncher
                 }
             }
 
-            AppendSessionIndexLines(sessionIndexPath, indexLines);
-            UpdateGlobalStateForHistoryCopies(createdEntries);
             SaveHistorySyncStore(store);
+            result.SessionIndexSyncedCount = RewriteSessionIndexForHistorySync(sessionIndexPath, store);
+            UpdateGlobalStateForHistoryCopies(createdEntries);
             LauncherLog.Info("History sync completed. " + sourceProvider + " -> " + targetProvider + ", copied: " + result.CopiedCount);
             return result;
         }
@@ -2173,6 +2188,185 @@ namespace CodexSiteLauncher
 
             Directory.CreateDirectory(Path.GetDirectoryName(sessionIndexPath));
             File.AppendAllText(sessionIndexPath, String.Join(Environment.NewLine, indexLines.ToArray()) + Environment.NewLine, Utf8NoBom);
+        }
+
+        private static int RewriteSessionIndexForHistorySync(string sessionIndexPath, HistorySyncStore store)
+        {
+            if (String.IsNullOrWhiteSpace(sessionIndexPath) || !File.Exists(sessionIndexPath) ||
+                store == null || store.Entries == null || store.Entries.Count == 0)
+            {
+                return 0;
+            }
+
+            List<SessionIndexRecord> records = LoadSessionIndexRecords(sessionIndexPath);
+            if (records.Count == 0)
+            {
+                return 0;
+            }
+
+            var byId = new Dictionary<string, SessionIndexRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (SessionIndexRecord record in records)
+            {
+                if (!String.IsNullOrWhiteSpace(record.Id) && record.Data != null && !byId.ContainsKey(record.Id))
+                {
+                    byId.Add(record.Id, record);
+                }
+            }
+
+            var duplicateIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var entriesByOriginal = new Dictionary<string, List<HistorySyncEntry>>(StringComparer.OrdinalIgnoreCase);
+            foreach (HistorySyncEntry entry in store.Entries)
+            {
+                if (String.IsNullOrWhiteSpace(entry.OriginalId) ||
+                    String.IsNullOrWhiteSpace(entry.DuplicateId) ||
+                    String.IsNullOrWhiteSpace(entry.TargetProvider))
+                {
+                    continue;
+                }
+
+                duplicateIds.Add(entry.DuplicateId);
+                List<HistorySyncEntry> list;
+                if (!entriesByOriginal.TryGetValue(entry.OriginalId, out list))
+                {
+                    list = new List<HistorySyncEntry>();
+                    entriesByOriginal.Add(entry.OriginalId, list);
+                }
+                list.Add(entry);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            var output = new List<string>();
+            var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int synced = 0;
+
+            foreach (SessionIndexRecord record in records)
+            {
+                if (!String.IsNullOrWhiteSpace(record.Id) && duplicateIds.Contains(record.Id))
+                {
+                    continue;
+                }
+
+                output.Add(SerializeSessionIndexRecord(serializer, record));
+                if (String.IsNullOrWhiteSpace(record.Id))
+                {
+                    continue;
+                }
+
+                List<HistorySyncEntry> entries;
+                if (!entriesByOriginal.TryGetValue(record.Id, out entries))
+                {
+                    continue;
+                }
+
+                foreach (HistorySyncEntry entry in entries)
+                {
+                    if (written.Contains(entry.DuplicateId) || !byId.ContainsKey(entry.OriginalId))
+                    {
+                        continue;
+                    }
+
+                    Dictionary<string, object> copy = BuildSessionIndexCopy(
+                        byId[entry.OriginalId].Data,
+                        entry.DuplicateId,
+                        entry.TargetProvider,
+                        entry.DuplicatePath);
+                    output.Add(serializer.Serialize(copy));
+                    written.Add(entry.DuplicateId);
+                    synced++;
+                }
+            }
+
+            foreach (HistorySyncEntry entry in store.Entries)
+            {
+                if (String.IsNullOrWhiteSpace(entry.OriginalId) ||
+                    String.IsNullOrWhiteSpace(entry.DuplicateId) ||
+                    written.Contains(entry.DuplicateId) ||
+                    !byId.ContainsKey(entry.OriginalId))
+                {
+                    continue;
+                }
+
+                Dictionary<string, object> copy = BuildSessionIndexCopy(
+                    byId[entry.OriginalId].Data,
+                    entry.DuplicateId,
+                    entry.TargetProvider,
+                    entry.DuplicatePath);
+                output.Add(serializer.Serialize(copy));
+                written.Add(entry.DuplicateId);
+                synced++;
+            }
+
+            File.WriteAllText(sessionIndexPath, String.Join(Environment.NewLine, output.ToArray()) + Environment.NewLine, Utf8NoBom);
+            return synced;
+        }
+
+        private static List<SessionIndexRecord> LoadSessionIndexRecords(string sessionIndexPath)
+        {
+            var records = new List<SessionIndexRecord>();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            foreach (string line in File.ReadAllLines(sessionIndexPath, Utf8NoBom))
+            {
+                if (String.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var data = serializer.DeserializeObject(line) as Dictionary<string, object>;
+                    string id = null;
+                    object idValue;
+                    if (data != null && data.TryGetValue("id", out idValue))
+                    {
+                        id = Convert.ToString(idValue);
+                    }
+
+                    records.Add(new SessionIndexRecord
+                    {
+                        Id = id,
+                        Data = data,
+                        RawLine = line
+                    });
+                }
+                catch
+                {
+                    records.Add(new SessionIndexRecord
+                    {
+                        RawLine = line
+                    });
+                }
+            }
+            return records;
+        }
+
+        private static string SerializeSessionIndexRecord(JavaScriptSerializer serializer, SessionIndexRecord record)
+        {
+            if (record != null && record.Data != null)
+            {
+                return serializer.Serialize(record.Data);
+            }
+            return record == null ? "" : (record.RawLine ?? "");
+        }
+
+        private static Dictionary<string, object> BuildSessionIndexCopy(
+            Dictionary<string, object> source,
+            string duplicateId,
+            string targetProvider,
+            string duplicatePath)
+        {
+            Dictionary<string, object> copy = DeepCloneJsonValue(source) as Dictionary<string, object>;
+            if (copy == null)
+            {
+                copy = new Dictionary<string, object>();
+            }
+
+            copy["id"] = duplicateId;
+            copy["model_provider"] = targetProvider;
+            if (!String.IsNullOrWhiteSpace(duplicatePath))
+            {
+                copy["rollout_path"] = duplicatePath;
+            }
+            return copy;
         }
 
         private static string BuildSessionIndexLine(string id, string title, long updatedAt)
