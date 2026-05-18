@@ -47,6 +47,7 @@ It was built for the Windows Store/MSIX version of Codex Desktop, where launchin
 | Windows Store/MSIX support | Starts Codex Desktop through the app activation path instead of directly opening `WindowsApps`. |
 | API key management | Saves API keys into Windows User environment variables. |
 | History sync | Copies `newapi` and `openai` local history in either direction, plus a bidirectional sync mode that refreshes existing pairs by latest update time. |
+| Migration rollback | Keeps the latest 10 pre-sync snapshots and can roll local history back from the UI. |
 | Dark UI | Dark WinForms interface with built-in site management. |
 
 ---
@@ -106,8 +107,18 @@ The **History Sync** area provides:
 - **Copy openai to newapi**: create `newapi`-visible copies for OpenAI threads.
 - **Bidirectional sync**: copy missing records in both directions, then refresh existing mapped pairs using the side with the newer `updated_at`.
 - **Estimate usage**: preview copy count and added storage.
+- **Migration records**: open the snapshot folder.
+- **Rollback migration**: restore a selected pre-sync snapshot.
 
 For consistent sorting, titles, archived state, and previews, sync rewrites complete `session_index.jsonl` records instead of minimal index stubs.
+
+Snapshots are stored under:
+
+```text
+%APPDATA%\CodexSiteLauncher\migration-backups
+```
+
+Each snapshot includes the state database, session index, global state, sync map, `sessions`, and `archived_sessions`. The launcher keeps the newest 10 snapshots.
 
 ---
 

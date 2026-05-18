@@ -189,12 +189,27 @@ namespace CodexSiteLauncher
     internal sealed class HistorySyncResult : HistorySyncEstimate
     {
         public int CopiedCount { get; set; }
+        public string MigrationBackupPath { get; set; }
         public string StateBackupPath { get; set; }
         public string StateWalBackupPath { get; set; }
         public string SessionIndexBackupPath { get; set; }
         public string GlobalStateBackupPath { get; set; }
         public int SessionIndexSyncedCount { get; set; }
         public int PairRefreshCount { get; set; }
+    }
+
+    internal sealed class MigrationBackupRecord
+    {
+        public string Id { get; set; }
+        public string CreatedAt { get; set; }
+        public string Reason { get; set; }
+        public string DirectoryPath { get; set; }
+        public string StateDbFileName { get; set; }
+
+        public override string ToString()
+        {
+            return CreatedAt + " · " + Reason;
+        }
     }
 
     internal static class SQLiteNative
@@ -1014,7 +1029,7 @@ namespace CodexSiteLauncher
             var historyGroup = new ThemedGroupBox();
             historyGroup.Text = "历史同步";
             historyGroup.Dock = DockStyle.Top;
-            historyGroup.Height = 118;
+            historyGroup.Height = 162;
             historyGroup.Margin = new Padding(0, 12, 0, 0);
             setupLayout.Controls.Add(historyGroup, 0, 3);
 
@@ -1041,8 +1056,16 @@ namespace CodexSiteLauncher
             estimateHistoryButton.Click += delegate { ShowHistorySyncEstimate(); };
             historyPanel.Controls.Add(estimateHistoryButton);
 
+            var rollbackButton = new Button { Text = "回滚迁移", Width = 118, Height = 36 };
+            rollbackButton.Click += delegate { ShowMigrationRollbackDialog(); };
+            historyPanel.Controls.Add(rollbackButton);
+
+            var openBackupsButton = new Button { Text = "迁移记录", Width = 118, Height = 36 };
+            openBackupsButton.Click += delegate { OpenMigrationBackupDirectory(); };
+            historyPanel.Controls.Add(openBackupsButton);
+
             var historyHint = new Label();
-            historyHint.Text = "双向同步会按更新时间刷新两边副本；同步前请完全退出 Codex。";
+            historyHint.Text = "同步前自动保存最近 10 次快照；双向同步按更新时间刷新两边副本。";
             historyHint.AutoSize = true;
             historyHint.Anchor = AnchorStyles.Left;
             historyHint.Margin = new Padding(8, 8, 0, 0);
@@ -1582,6 +1605,11 @@ namespace CodexSiteLauncher
                 }
 
                 HistorySyncEstimate estimate = EstimateHistorySync(sourceProvider, targetProvider);
+                if (!ConfirmHistoryStateCoverage(estimate.StateDbPath))
+                {
+                    statusLabel.Text = "已取消历史同步。";
+                    return;
+                }
                 if (estimate.CopyCount <= 0 && estimate.ExistingCopies <= 0)
                 {
                     statusLabel.Text = "没有需要复制的 " + sourceProvider + " 历史记录。";
@@ -1632,7 +1660,7 @@ namespace CodexSiteLauncher
                     "复制记录：" + sync.CopiedCount + Environment.NewLine +
                     "刷新索引：" + sync.SessionIndexSyncedCount + Environment.NewLine +
                     "新增空间：" + FormatBytes(sync.CopyBytes) + Environment.NewLine +
-                    "SQLite 备份：" + sync.StateBackupPath,
+                    "迁移快照：" + sync.MigrationBackupPath,
                     "历史同步",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -1664,6 +1692,11 @@ namespace CodexSiteLauncher
 
                 HistorySyncEstimate first = EstimateHistorySync(providerA, providerB);
                 HistorySyncEstimate second = EstimateHistorySync(providerB, providerA);
+                if (!ConfirmHistoryStateCoverage(first.StateDbPath))
+                {
+                    statusLabel.Text = "已取消双向同步。";
+                    return;
+                }
                 int existingPairs = CountHistorySyncPairs(providerA, providerB);
                 int copyCount = first.CopyCount + second.CopyCount;
                 long copyBytes = first.CopyBytes + second.CopyBytes;
@@ -1698,10 +1731,11 @@ namespace CodexSiteLauncher
                     return;
                 }
 
-                HistorySyncResult forward = CopyHistoryProvider(providerA, providerB, false, false);
-                HistorySyncResult backward = CopyHistoryProvider(providerB, providerA, false, false);
-
                 string statePath = FindCurrentStateDatabase();
+                MigrationBackupRecord backup = CreateMigrationBackup("双向同步 " + providerA + " <-> " + providerB, statePath);
+                HistorySyncResult forward = CopyHistoryProvider(providerA, providerB, false, false, false);
+                HistorySyncResult backward = CopyHistoryProvider(providerB, providerA, false, false, false);
+
                 string sessionIndexPath = Path.Combine(GetCodexHomeDirectory(), "session_index.jsonl");
                 HistorySyncStore store = LoadHistorySyncStore();
                 int refreshed = RefreshHistorySyncPairs(statePath, store, providerA, providerB, true);
@@ -1716,7 +1750,8 @@ namespace CodexSiteLauncher
                     "新增复制：" + copied + " 条" + Environment.NewLine +
                     "刷新配对：" + refreshed + " 对" + Environment.NewLine +
                     "刷新索引：" + indexSynced + " 条" + Environment.NewLine +
-                    "新增空间：" + FormatBytes(forward.CopyBytes + backward.CopyBytes),
+                    "新增空间：" + FormatBytes(forward.CopyBytes + backward.CopyBytes) + Environment.NewLine +
+                    "迁移快照：" + backup.DirectoryPath,
                     "双向同步",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -1785,6 +1820,53 @@ namespace CodexSiteLauncher
             return result == DialogResult.Yes;
         }
 
+        private bool ConfirmHistoryStateCoverage(string statePath)
+        {
+            List<string> unknownTables = FindUnhandledThreadChildTables(statePath);
+            if (unknownTables.Count == 0)
+            {
+                return true;
+            }
+
+            string message = "检测到 Codex 数据库里存在当前版本未验证覆盖的 thread_id 状态表：" +
+                Environment.NewLine + Environment.NewLine +
+                String.Join(Environment.NewLine, unknownTables.ToArray()) +
+                Environment.NewLine + Environment.NewLine +
+                "这些表可能属于新版本 Codex 的附加状态。继续同步不会处理这些未知表，可能导致少量 UI/工具状态不同步。" +
+                Environment.NewLine + Environment.NewLine +
+                "仍要继续吗？";
+            LauncherLog.Info("Unhandled thread child tables detected: " + String.Join(", ", unknownTables.ToArray()));
+            return MessageBox.Show(this, message, "历史状态覆盖提醒", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+        }
+
+        private static List<string> FindUnhandledThreadChildTables(string statePath)
+        {
+            var unknown = new List<string>();
+            if (String.IsNullOrWhiteSpace(statePath) || !File.Exists(statePath))
+            {
+                return unknown;
+            }
+
+            var handled = new HashSet<string>(KnownThreadChildTables(), StringComparer.OrdinalIgnoreCase);
+            using (var db = new SQLiteDatabase(statePath))
+            {
+                foreach (string table in GetAllTableNames(db))
+                {
+                    if (handled.Contains(table) || String.Equals(table, "threads", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    List<string> columns = GetTableColumns(db, table);
+                    if (columns.Any(c => String.Equals(c, "thread_id", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        unknown.Add(table);
+                    }
+                }
+            }
+            return unknown;
+        }
+
         private HistorySyncEstimate EstimateHistorySync(string sourceProvider, string targetProvider)
         {
             string statePath = FindCurrentStateDatabase();
@@ -1846,15 +1928,18 @@ namespace CodexSiteLauncher
 
         private HistorySyncResult CopyHistoryProvider(string sourceProvider, string targetProvider)
         {
-            return CopyHistoryProvider(sourceProvider, targetProvider, true, false);
+            return CopyHistoryProvider(sourceProvider, targetProvider, true, false, true);
         }
 
-        private HistorySyncResult CopyHistoryProvider(string sourceProvider, string targetProvider, bool refreshExistingPairs, bool preferNewestIndex)
+        private HistorySyncResult CopyHistoryProvider(string sourceProvider, string targetProvider, bool refreshExistingPairs, bool preferNewestIndex, bool createMigrationBackup)
         {
             HistorySyncEstimate estimate = EstimateHistorySync(sourceProvider, targetProvider);
             string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
             string sessionIndexPath = Path.Combine(GetCodexHomeDirectory(), "session_index.jsonl");
             string globalStatePath = Path.Combine(GetCodexHomeDirectory(), ".codex-global-state.json");
+            MigrationBackupRecord migrationBackup = createMigrationBackup
+                ? CreateMigrationBackup("历史同步 " + sourceProvider + " -> " + targetProvider, estimate.StateDbPath)
+                : null;
 
             var result = new HistorySyncResult
             {
@@ -1866,6 +1951,7 @@ namespace CodexSiteLauncher
                 CopyCount = estimate.CopyCount,
                 MissingFiles = estimate.MissingFiles,
                 CopyBytes = estimate.CopyBytes,
+                MigrationBackupPath = migrationBackup == null ? "" : migrationBackup.DirectoryPath,
                 StateBackupPath = BackupExistingFile(estimate.StateDbPath, "before-history-sync-" + stamp),
                 StateWalBackupPath = BackupExistingFile(estimate.StateDbPath + "-wal", "before-history-sync-" + stamp),
                 SessionIndexBackupPath = BackupExistingFile(sessionIndexPath, "before-history-sync-" + stamp),
@@ -2108,12 +2194,39 @@ namespace CodexSiteLauncher
         private static List<string> GetThreadChildTables(SQLiteDatabase db)
         {
             var tables = new List<string>();
-            string[] candidates = { "thread_dynamic_tools", "stage1_outputs", "thread_goals" };
+            string[] candidates = KnownThreadChildTables();
             foreach (string candidate in candidates)
             {
                 if (TableExists(db, candidate))
                 {
                     tables.Add(candidate);
+                }
+            }
+            return tables;
+        }
+
+        private static string[] KnownThreadChildTables()
+        {
+            return new[] { "thread_dynamic_tools", "stage1_outputs", "thread_goals" };
+        }
+
+        private static List<string> GetAllTableNames(SQLiteDatabase db)
+        {
+            var tables = new List<string>();
+            using (SQLiteStatement stmt = db.Prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"))
+            {
+                while (true)
+                {
+                    int rc = stmt.Step();
+                    if (rc == SQLiteNative.Done)
+                    {
+                        break;
+                    }
+                    if (rc != SQLiteNative.Row)
+                    {
+                        throw new InvalidOperationException(db.ErrorMessage());
+                    }
+                    tables.Add(stmt.ColumnText(0));
                 }
             }
             return tables;
@@ -2411,6 +2524,295 @@ namespace CodexSiteLauncher
             string backup = path + "." + suffix + ".bak";
             File.Copy(path, backup, true);
             return backup;
+        }
+
+        private string MigrationBackupRoot
+        {
+            get { return Path.Combine(configDir, "migration-backups"); }
+        }
+
+        private MigrationBackupRecord CreateMigrationBackup(string reason, string statePath)
+        {
+            Directory.CreateDirectory(MigrationBackupRoot);
+
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            string id = stamp + "-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            string backupDir = Path.Combine(MigrationBackupRoot, id);
+            Directory.CreateDirectory(backupDir);
+
+            string codexHome = GetCodexHomeDirectory();
+            string normalizedStatePath = NormalizeFileSystemPath(statePath);
+            string stateFileName = String.IsNullOrWhiteSpace(normalizedStatePath)
+                ? ""
+                : Path.GetFileName(normalizedStatePath);
+
+            CopyFileIfExists(normalizedStatePath, Path.Combine(backupDir, stateFileName));
+            CopyFileIfExists(normalizedStatePath + "-wal", Path.Combine(backupDir, stateFileName + "-wal"));
+            CopyFileIfExists(normalizedStatePath + "-shm", Path.Combine(backupDir, stateFileName + "-shm"));
+            CopyFileIfExists(Path.Combine(codexHome, "session_index.jsonl"), Path.Combine(backupDir, "session_index.jsonl"));
+            CopyFileIfExists(Path.Combine(codexHome, ".codex-global-state.json"), Path.Combine(backupDir, ".codex-global-state.json"));
+            CopyFileIfExists(Path.Combine(configDir, "history-sync.json"), Path.Combine(backupDir, "history-sync.json"));
+            CopyDirectoryIfExists(Path.Combine(codexHome, "sessions"), Path.Combine(backupDir, "sessions"));
+            CopyDirectoryIfExists(Path.Combine(codexHome, "archived_sessions"), Path.Combine(backupDir, "archived_sessions"));
+
+            var record = new MigrationBackupRecord
+            {
+                Id = id,
+                CreatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                Reason = reason,
+                DirectoryPath = backupDir,
+                StateDbFileName = stateFileName
+            };
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            File.WriteAllText(Path.Combine(backupDir, "manifest.json"), serializer.Serialize(record), Utf8NoBom);
+            PruneMigrationBackups(10);
+            LauncherLog.Info("Migration backup created. Reason: " + reason + ", path: " + backupDir);
+            return record;
+        }
+
+        private void PruneMigrationBackups(int keepCount)
+        {
+            if (!Directory.Exists(MigrationBackupRoot))
+            {
+                return;
+            }
+
+            DirectoryInfo[] backups = new DirectoryInfo(MigrationBackupRoot)
+                .GetDirectories()
+                .OrderByDescending(d => d.CreationTimeUtc)
+                .ToArray();
+            for (int i = keepCount; i < backups.Length; i++)
+            {
+                try
+                {
+                    backups[i].Delete(true);
+                    LauncherLog.Info("Old migration backup pruned: " + backups[i].FullName);
+                }
+                catch (Exception ex)
+                {
+                    LauncherLog.Error("Failed to prune migration backup: " + backups[i].FullName, ex);
+                }
+            }
+        }
+
+        private List<MigrationBackupRecord> LoadMigrationBackups()
+        {
+            var records = new List<MigrationBackupRecord>();
+            if (!Directory.Exists(MigrationBackupRoot))
+            {
+                return records;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            foreach (DirectoryInfo dir in new DirectoryInfo(MigrationBackupRoot).GetDirectories().OrderByDescending(d => d.CreationTimeUtc))
+            {
+                string manifest = Path.Combine(dir.FullName, "manifest.json");
+                MigrationBackupRecord record = null;
+                if (File.Exists(manifest))
+                {
+                    try
+                    {
+                        record = serializer.Deserialize<MigrationBackupRecord>(File.ReadAllText(manifest, Utf8NoBom));
+                    }
+                    catch (Exception ex)
+                    {
+                        LauncherLog.Error("Failed to read migration backup manifest: " + manifest, ex);
+                    }
+                }
+
+                if (record == null)
+                {
+                    record = new MigrationBackupRecord
+                    {
+                        Id = dir.Name,
+                        CreatedAt = dir.CreationTime.ToString("yyyy-MM-dd HH:mm:ss"),
+                        Reason = "未知迁移",
+                        DirectoryPath = dir.FullName,
+                        StateDbFileName = FindFirstStateDbFileName(dir.FullName)
+                    };
+                }
+                record.DirectoryPath = dir.FullName;
+                records.Add(record);
+            }
+            return records;
+        }
+
+        private void OpenMigrationBackupDirectory()
+        {
+            try
+            {
+                Directory.CreateDirectory(MigrationBackupRoot);
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = MigrationBackupRoot,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                LauncherLog.Error("Failed to open migration backup directory.", ex);
+                MessageBox.Show(this, ex.Message, "打开迁移记录失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ShowMigrationRollbackDialog()
+        {
+            try
+            {
+                List<MigrationBackupRecord> records = LoadMigrationBackups();
+                if (records.Count == 0)
+                {
+                    MessageBox.Show(this, "还没有迁移快照。", "回滚迁移", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                using (var dialog = new MigrationRollbackForm(records))
+                {
+                    if (dialog.ShowDialog(this) != DialogResult.OK || dialog.SelectedRecord == null)
+                    {
+                        return;
+                    }
+
+                    MigrationBackupRecord selected = dialog.SelectedRecord;
+                    DialogResult confirm = MessageBox.Show(
+                        this,
+                        "将回滚到这个迁移前快照：" + Environment.NewLine +
+                        selected.ToString() + Environment.NewLine + Environment.NewLine +
+                        "会恢复 state_*.sqlite、session_index.jsonl、global state、history-sync.json、sessions 和 archived_sessions。" +
+                        Environment.NewLine + Environment.NewLine +
+                        "请确认 Codex Desktop 已完全退出。继续吗？",
+                        "确认回滚迁移",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning);
+                    if (confirm != DialogResult.Yes)
+                    {
+                        return;
+                    }
+
+                    if (!ConfirmHistorySyncWhenCodexRunning())
+                    {
+                        statusLabel.Text = "已取消迁移回滚。";
+                        return;
+                    }
+
+                    MigrationBackupRecord rollbackSafety = CreateMigrationBackup("回滚前保护快照", FindCurrentStateDatabase());
+                    RestoreMigrationBackup(selected);
+                    statusLabel.Text = "已回滚迁移快照：" + selected.CreatedAt;
+                    MessageBox.Show(
+                        this,
+                        "回滚完成。" + Environment.NewLine +
+                        "回滚来源：" + selected.DirectoryPath + Environment.NewLine +
+                        "回滚前保护快照：" + rollbackSafety.DirectoryPath,
+                        "回滚迁移",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                LauncherLog.Error("Migration rollback failed.", ex);
+                MessageBox.Show(this, ex.Message, "回滚迁移失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void RestoreMigrationBackup(MigrationBackupRecord record)
+        {
+            if (record == null || String.IsNullOrWhiteSpace(record.DirectoryPath) || !Directory.Exists(record.DirectoryPath))
+            {
+                throw new DirectoryNotFoundException("找不到迁移快照目录。");
+            }
+
+            string codexHome = GetCodexHomeDirectory();
+            string stateFileName = String.IsNullOrWhiteSpace(record.StateDbFileName)
+                ? FindFirstStateDbFileName(record.DirectoryPath)
+                : record.StateDbFileName;
+            if (!String.IsNullOrWhiteSpace(stateFileName))
+            {
+                RestoreFileFromBackup(record.DirectoryPath, stateFileName, Path.Combine(codexHome, stateFileName), true);
+                RestoreFileFromBackup(record.DirectoryPath, stateFileName + "-wal", Path.Combine(codexHome, stateFileName + "-wal"), true);
+                RestoreFileFromBackup(record.DirectoryPath, stateFileName + "-shm", Path.Combine(codexHome, stateFileName + "-shm"), true);
+            }
+
+            RestoreFileFromBackup(record.DirectoryPath, "session_index.jsonl", Path.Combine(codexHome, "session_index.jsonl"), true);
+            RestoreFileFromBackup(record.DirectoryPath, ".codex-global-state.json", Path.Combine(codexHome, ".codex-global-state.json"), true);
+            RestoreFileFromBackup(record.DirectoryPath, "history-sync.json", Path.Combine(configDir, "history-sync.json"), true);
+            RestoreDirectoryFromBackup(Path.Combine(record.DirectoryPath, "sessions"), Path.Combine(codexHome, "sessions"));
+            RestoreDirectoryFromBackup(Path.Combine(record.DirectoryPath, "archived_sessions"), Path.Combine(codexHome, "archived_sessions"));
+            LauncherLog.Info("Migration backup restored: " + record.DirectoryPath);
+        }
+
+        private static void CopyFileIfExists(string source, string destination)
+        {
+            if (String.IsNullOrWhiteSpace(source) || String.IsNullOrWhiteSpace(destination) || !File.Exists(source))
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(destination));
+            File.Copy(source, destination, true);
+        }
+
+        private static void RestoreFileFromBackup(string backupDir, string fileName, string destination, bool deleteIfMissing)
+        {
+            string source = Path.Combine(backupDir, fileName);
+            if (File.Exists(source))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(destination));
+                File.Copy(source, destination, true);
+            }
+            else if (deleteIfMissing && File.Exists(destination))
+            {
+                File.Delete(destination);
+            }
+        }
+
+        private static void CopyDirectoryIfExists(string source, string destination)
+        {
+            if (String.IsNullOrWhiteSpace(source) || !Directory.Exists(source))
+            {
+                return;
+            }
+
+            CopyDirectory(source, destination);
+        }
+
+        private static void RestoreDirectoryFromBackup(string source, string destination)
+        {
+            if (Directory.Exists(destination))
+            {
+                Directory.Delete(destination, true);
+            }
+            if (Directory.Exists(source))
+            {
+                CopyDirectory(source, destination);
+            }
+        }
+
+        private static void CopyDirectory(string source, string destination)
+        {
+            Directory.CreateDirectory(destination);
+            foreach (string directory in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
+            {
+                Directory.CreateDirectory(directory.Replace(source, destination));
+            }
+            foreach (string file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+            {
+                string target = file.Replace(source, destination);
+                Directory.CreateDirectory(Path.GetDirectoryName(target));
+                File.Copy(file, target, true);
+            }
+        }
+
+        private static string FindFirstStateDbFileName(string directory)
+        {
+            if (String.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+            {
+                return "";
+            }
+
+            string[] files = Directory.GetFiles(directory, "state_*.sqlite");
+            return files.Length == 0 ? "" : Path.GetFileName(files[0]);
         }
 
         private static string BuildDuplicateRolloutPath(string sourcePath, string sourceId, string newId)
@@ -3773,6 +4175,82 @@ namespace CodexSiteLauncher
                 }
             }
             return "";
+        }
+    }
+
+    internal sealed class MigrationRollbackForm : Form
+    {
+        private readonly ListBox backupList;
+
+        public MigrationBackupRecord SelectedRecord { get; private set; }
+
+        public MigrationRollbackForm(List<MigrationBackupRecord> records)
+        {
+            Text = "迁移记录";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            Width = 720;
+            Height = 420;
+            Font = new Font("Microsoft YaHei UI", 10.5F, FontStyle.Regular, GraphicsUnit.Point);
+            LauncherIcon.Apply(this);
+            BackColor = AppTheme.AppBack;
+            ForeColor = AppTheme.PrimaryText;
+
+            var layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.Padding = new Padding(12);
+            layout.RowCount = 3;
+            layout.ColumnCount = 1;
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            Controls.Add(layout);
+
+            var hint = new Label();
+            hint.Text = "选择要回滚到的迁移前快照。列表只保留最近 10 次迁移快照。";
+            hint.AutoSize = true;
+            hint.Margin = new Padding(0, 0, 0, 8);
+            layout.Controls.Add(hint, 0, 0);
+
+            backupList = new ListBox();
+            backupList.Dock = DockStyle.Fill;
+            backupList.HorizontalScrollbar = true;
+            foreach (MigrationBackupRecord record in records)
+            {
+                backupList.Items.Add(record);
+            }
+            if (backupList.Items.Count > 0)
+            {
+                backupList.SelectedIndex = 0;
+            }
+            layout.Controls.Add(backupList, 0, 1);
+
+            var buttons = new FlowLayoutPanel();
+            buttons.Dock = DockStyle.Fill;
+            buttons.FlowDirection = FlowDirection.RightToLeft;
+            buttons.AutoSize = true;
+            buttons.Margin = new Padding(0, 12, 0, 0);
+            layout.Controls.Add(buttons, 0, 2);
+
+            var okButton = new Button { Text = "回滚", DialogResult = DialogResult.OK, Width = 100, Height = 36 };
+            okButton.Click += delegate
+            {
+                SelectedRecord = backupList.SelectedItem as MigrationBackupRecord;
+                if (SelectedRecord == null)
+                {
+                    DialogResult = DialogResult.None;
+                }
+            };
+            buttons.Controls.Add(okButton);
+
+            var cancelButton = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Width = 100, Height = 36 };
+            buttons.Controls.Add(cancelButton);
+
+            AcceptButton = okButton;
+            CancelButton = cancelButton;
+            AppTheme.Apply(this);
         }
     }
 

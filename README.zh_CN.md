@@ -47,6 +47,7 @@ Windows 商店 / MSIX 版 Codex Desktop 不能像普通 exe 那样稳定接收�
 | 支持商店版 Codex | 通过 Windows 应用激活方式启动，不需要进入 `WindowsApps`。 |
 | API Key 管理 | 将 API Key 保存到 Windows 用户环境变量。 |
 | 历史同步 | 支持 `newapi` 与 `openai` 单向复制，也支持按更新时间刷新已有配对的双向同步。 |
+| 迁移回滚 | 保留最近 10 次同步前快照，可在界面里选择快照回滚。 |
 | 深色界面 | 深色 WinForms 界面，支持站点管理和筛选。 |
 
 ---
@@ -106,8 +107,18 @@ C:\Users\<你>\.codex\logs_*.sqlite
 - **复制 openai 到 newapi**：给 OpenAI 对话创建 `newapi` 侧可见副本。
 - **双向同步**：两边缺什么补什么，并按较新的 `updated_at` 刷新已有配对。
 - **预估占用**：同步前查看预计复制数量和新增空间。
+- **迁移记录**：打开同步快照目录。
+- **回滚迁移**：选择一个同步前快照并恢复。
 
 为了让排序、标题、归档状态和预览尽量一致，同步会重写完整 `session_index.jsonl` 记录，而不是只写最简索引。
+
+快照保存在：
+
+```text
+%APPDATA%\CodexSiteLauncher\migration-backups
+```
+
+每个快照包含 state 数据库、历史索引、global state、同步映射、`sessions` 和 `archived_sessions`。启动器只保留最新 10 个快照。
 
 ---
 
