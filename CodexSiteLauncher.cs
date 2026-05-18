@@ -429,9 +429,7 @@ namespace CodexSiteLauncher
         {
             get
             {
-                return Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                    "CodexSiteLauncher");
+                return LauncherPaths.GetLauncherDataDirectory();
             }
         }
 
@@ -497,6 +495,35 @@ namespace CodexSiteLauncher
                 File.Delete(oldPath);
             }
             File.Move(LogPath, oldPath);
+        }
+    }
+
+    internal static class LauncherPaths
+    {
+        public static string GetLauncherDataDirectory()
+        {
+            string overridePath = Environment.GetEnvironmentVariable("CODEX_SITE_LAUNCHER_DATA_OVERRIDE");
+            if (!String.IsNullOrWhiteSpace(overridePath))
+            {
+                return Path.GetFullPath(overridePath);
+            }
+
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "CodexSiteLauncher");
+        }
+
+        public static string GetCodexHomeDirectory()
+        {
+            string overridePath = Environment.GetEnvironmentVariable("CODEX_HOME_OVERRIDE");
+            if (!String.IsNullOrWhiteSpace(overridePath))
+            {
+                return Path.GetFullPath(overridePath);
+            }
+
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".codex");
         }
     }
 
@@ -792,8 +819,7 @@ namespace CodexSiteLauncher
             Height = 740;
 
             configDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "CodexSiteLauncher");
+                LauncherPaths.GetLauncherDataDirectory());
             configPath = Path.Combine(configDir, "sites.json");
             LauncherLog.Info("Launcher started. Config store: " + configPath);
 
@@ -2511,7 +2537,7 @@ namespace CodexSiteLauncher
 
         private static string GetCodexHomeDirectory()
         {
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+            return LauncherPaths.GetCodexHomeDirectory();
         }
 
         private static string BackupExistingFile(string path, string suffix)
