@@ -39,13 +39,14 @@ It was built for the Windows Store/MSIX version of Codex Desktop, where launchin
 | Feature | Description |
 | --- | --- |
 | Provider switching | One-click launch for Facai API, Code Relay, QuickRouter, and custom providers. |
-| Conversation-safe | Does not touch Codex session files, SQLite databases, or conversation history. |
+| Conversation-aware | Normal provider launches do not touch conversation files; optional history sync can copy provider-specific local history with backups. |
 | Temporary config switch | Temporarily edits `config.toml`, launches Codex, then restores the previous config. |
 | Backups | Keeps launcher baseline and last-before-launch config backups for comparison. |
 | Resilient restore | If Codex also edits `config.toml` during startup, restores only launcher-owned fields and preserves other changes. |
 | Diagnostics log | Includes a log file and an **Open Log** button for startup and restore troubleshooting. |
 | Windows Store/MSIX support | Starts Codex Desktop through the app activation path instead of directly opening `WindowsApps`. |
 | API key management | Saves API keys into Windows User environment variables. |
+| History sync | Copies `newapi` and `openai` local history in either direction, plus a bidirectional sync mode that refreshes existing pairs by latest update time. |
 | Dark UI | Dark WinForms interface with built-in site management. |
 
 ---
@@ -85,7 +86,7 @@ C:\Users\<you>\.codex\config.toml.before-site-launcher.txt
 C:\Users\<you>\.codex\config.toml.last-before-site-launcher.txt
 ```
 
-The launcher does **not** modify:
+Normal provider launch does **not** modify:
 
 ```text
 C:\Users\<you>\.codex\sessions
@@ -94,6 +95,19 @@ C:\Users\<you>\.codex\session_index.jsonl
 C:\Users\<you>\.codex\state_*.sqlite
 C:\Users\<you>\.codex\logs_*.sqlite
 ```
+
+The optional history sync buttons do modify local history files. They create backups before touching `state_*.sqlite`, `session_index.jsonl`, and global state.
+
+### History Sync
+
+The **History Sync** area provides:
+
+- **Copy newapi to openai**: create OpenAI-visible copies for `newapi` threads.
+- **Copy openai to newapi**: create `newapi`-visible copies for OpenAI threads.
+- **Bidirectional sync**: copy missing records in both directions, then refresh existing mapped pairs using the side with the newer `updated_at`.
+- **Estimate usage**: preview copy count and added storage.
+
+For consistent sorting, titles, archived state, and previews, sync rewrites complete `session_index.jsonl` records instead of minimal index stubs.
 
 ---
 

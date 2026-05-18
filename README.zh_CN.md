@@ -39,13 +39,14 @@ Windows 商店 / MSIX 版 Codex Desktop 不能像普通 exe 那样稳定接收�
 | 功能 | 说明 |
 | --- | --- |
 | 站点切换 | 内置 Facai API、Code Relay、QuickRouter，也支持自定义站点。 |
-| 保护对话记录 | 不修改 Codex 的 sessions、sqlite 数据库或历史索引。 |
+| 感知对话记录 | 普通启动不动聊天文件；可选历史同步会带备份复制不同 provider 的本地记录。 |
 | 临时配置切换 | 启动前临时改 `config.toml`，启动后自动恢复。 |
 | 配置备份 | 保留启动器初始对照和上一次启动前配置。 |
 | 容错恢复 | 如果 Codex 启动时也改了 `config.toml`，会只恢复启动器改过的字段并保留其它变更。 |
 | 诊断日志 | 内置日志文件和“打开日志”按钮，方便排查启动或恢复问题。 |
 | 支持商店版 Codex | 通过 Windows 应用激活方式启动，不需要进入 `WindowsApps`。 |
 | API Key 管理 | 将 API Key 保存到 Windows 用户环境变量。 |
+| 历史同步 | 支持 `newapi` 与 `openai` 单向复制，也支持按更新时间刷新已有配对的双向同步。 |
 | 深色界面 | 深色 WinForms 界面，支持站点管理和筛选。 |
 
 ---
@@ -85,7 +86,7 @@ C:\Users\<你>\.codex\config.toml.before-site-launcher.txt
 C:\Users\<你>\.codex\config.toml.last-before-site-launcher.txt
 ```
 
-它不会修改这些聊天记录相关文件：
+普通站点启动不会修改这些聊天记录相关文件：
 
 ```text
 C:\Users\<你>\.codex\sessions
@@ -94,6 +95,19 @@ C:\Users\<你>\.codex\session_index.jsonl
 C:\Users\<你>\.codex\state_*.sqlite
 C:\Users\<你>\.codex\logs_*.sqlite
 ```
+
+可选的历史同步按钮会修改本地历史文件。执行前会先备份 `state_*.sqlite`、`session_index.jsonl` 和 global state。
+
+### 历史同步
+
+**历史同步**区域提供：
+
+- **复制 newapi 到 openai**：给 `newapi` 对话创建 OpenAI 侧可见副本。
+- **复制 openai 到 newapi**：给 OpenAI 对话创建 `newapi` 侧可见副本。
+- **双向同步**：两边缺什么补什么，并按较新的 `updated_at` 刷新已有配对。
+- **预估占用**：同步前查看预计复制数量和新增空间。
+
+为了让排序、标题、归档状态和预览尽量一致，同步会重写完整 `session_index.jsonl` 记录，而不是只写最简索引。
 
 ---
 

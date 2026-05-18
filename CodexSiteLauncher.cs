@@ -160,6 +160,7 @@ namespace CodexSiteLauncher
     internal sealed class HistoryThreadRow
     {
         public string Id { get; set; }
+        public string ModelProvider { get; set; }
         public string RolloutPath { get; set; }
         public string Title { get; set; }
         public long UpdatedAt { get; set; }
@@ -193,6 +194,7 @@ namespace CodexSiteLauncher
         public string SessionIndexBackupPath { get; set; }
         public string GlobalStateBackupPath { get; set; }
         public int SessionIndexSyncedCount { get; set; }
+        public int PairRefreshCount { get; set; }
     }
 
     internal static class SQLiteNative
@@ -1031,12 +1033,16 @@ namespace CodexSiteLauncher
             syncOpenAiToNewApiButton.Click += delegate { SyncHistoryProvider("openai", "newapi"); };
             historyPanel.Controls.Add(syncOpenAiToNewApiButton);
 
+            var syncBothWaysButton = new Button { Text = "双向同步", Width = 118, Height = 36 };
+            syncBothWaysButton.Click += delegate { SyncHistoryBothWays("newapi", "openai"); };
+            historyPanel.Controls.Add(syncBothWaysButton);
+
             var estimateHistoryButton = new Button { Text = "预估占用", Width = 110, Height = 36 };
             estimateHistoryButton.Click += delegate { ShowHistorySyncEstimate(); };
             historyPanel.Controls.Add(estimateHistoryButton);
 
             var historyHint = new Label();
-            historyHint.Text = "复制会话副本并改 provider；原记录不动。同步前请完全退出 Codex。";
+            historyHint.Text = "双向同步会按更新时间刷新两边副本；同步前请完全退出 Codex。";
             historyHint.AutoSize = true;
             historyHint.Anchor = AnchorStyles.Left;
             historyHint.Margin = new Padding(8, 8, 0, 0);
@@ -1638,6 +1644,90 @@ namespace CodexSiteLauncher
             }
         }
 
+        private void SyncHistoryBothWays(string providerA, string providerB)
+        {
+            providerA = NormalizeProviderName(providerA);
+            providerB = NormalizeProviderName(providerB);
+
+            if (String.Equals(providerA, providerB, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            try
+            {
+                if (!ConfirmHistorySyncWhenCodexRunning())
+                {
+                    statusLabel.Text = "已取消双向同步。";
+                    return;
+                }
+
+                HistorySyncEstimate first = EstimateHistorySync(providerA, providerB);
+                HistorySyncEstimate second = EstimateHistorySync(providerB, providerA);
+                int existingPairs = CountHistorySyncPairs(providerA, providerB);
+                int copyCount = first.CopyCount + second.CopyCount;
+                long copyBytes = first.CopyBytes + second.CopyBytes;
+
+                if (copyCount <= 0 && existingPairs <= 0)
+                {
+                    MessageBox.Show(
+                        this,
+                        "没有可同步的历史记录。" + Environment.NewLine +
+                        providerA + " <-> " + providerB,
+                        "双向同步",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
+
+                DialogResult confirm = MessageBox.Show(
+                    this,
+                    "将执行双向同步：" + providerA + " <-> " + providerB + Environment.NewLine + Environment.NewLine +
+                    providerA + " -> " + providerB + "：新增 " + first.CopyCount + " 条" + Environment.NewLine +
+                    providerB + " -> " + providerA + "：新增 " + second.CopyCount + " 条" + Environment.NewLine +
+                    "已有同步关系：" + existingPairs + " 条" + Environment.NewLine +
+                    "预计新增空间：" + FormatBytes(copyBytes) + Environment.NewLine + Environment.NewLine +
+                    "已有同步关系会按 updated_at 选择较新的那边刷新另一边；同步前建议完全退出 Codex。",
+                    "确认双向同步",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (confirm != DialogResult.Yes)
+                {
+                    statusLabel.Text = "已取消双向同步。";
+                    return;
+                }
+
+                HistorySyncResult forward = CopyHistoryProvider(providerA, providerB, false, false);
+                HistorySyncResult backward = CopyHistoryProvider(providerB, providerA, false, false);
+
+                string statePath = FindCurrentStateDatabase();
+                string sessionIndexPath = Path.Combine(GetCodexHomeDirectory(), "session_index.jsonl");
+                HistorySyncStore store = LoadHistorySyncStore();
+                int refreshed = RefreshHistorySyncPairs(statePath, store, providerA, providerB, true);
+                int indexSynced = RewriteSessionIndexForHistorySync(sessionIndexPath, store, true);
+
+                int copied = forward.CopiedCount + backward.CopiedCount;
+                statusLabel.Text = "双向同步完成：" + providerA + " <-> " + providerB +
+                    "，复制 " + copied + " 条，刷新 " + refreshed + " 对，索引 " + indexSynced + " 条。";
+                MessageBox.Show(
+                    this,
+                    "双向同步完成。" + Environment.NewLine +
+                    "新增复制：" + copied + " 条" + Environment.NewLine +
+                    "刷新配对：" + refreshed + " 对" + Environment.NewLine +
+                    "刷新索引：" + indexSynced + " 条" + Environment.NewLine +
+                    "新增空间：" + FormatBytes(forward.CopyBytes + backward.CopyBytes),
+                    "双向同步",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                LauncherLog.Error("Bidirectional history sync failed. " + providerA + " <-> " + providerB, ex);
+                MessageBox.Show(this, ex.Message, "双向同步失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
         private void ShowHistorySyncEstimate()
         {
             try
@@ -1756,6 +1846,11 @@ namespace CodexSiteLauncher
 
         private HistorySyncResult CopyHistoryProvider(string sourceProvider, string targetProvider)
         {
+            return CopyHistoryProvider(sourceProvider, targetProvider, true, false);
+        }
+
+        private HistorySyncResult CopyHistoryProvider(string sourceProvider, string targetProvider, bool refreshExistingPairs, bool preferNewestIndex)
+        {
             HistorySyncEstimate estimate = EstimateHistorySync(sourceProvider, targetProvider);
             string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
             string sessionIndexPath = Path.Combine(GetCodexHomeDirectory(), "session_index.jsonl");
@@ -1870,7 +1965,11 @@ namespace CodexSiteLauncher
             }
 
             SaveHistorySyncStore(store);
-            result.SessionIndexSyncedCount = RewriteSessionIndexForHistorySync(sessionIndexPath, store);
+            if (refreshExistingPairs)
+            {
+                result.PairRefreshCount = RefreshHistorySyncPairs(estimate.StateDbPath, store, sourceProvider, targetProvider, false);
+            }
+            result.SessionIndexSyncedCount = RewriteSessionIndexForHistorySync(sessionIndexPath, store, preferNewestIndex);
             UpdateGlobalStateForHistoryCopies(createdEntries);
             LauncherLog.Info("History sync completed. " + sourceProvider + " -> " + targetProvider + ", copied: " + result.CopiedCount);
             return result;
@@ -1926,6 +2025,39 @@ namespace CodexSiteLauncher
             return null;
         }
 
+        private int CountHistorySyncPairs(string providerA, string providerB)
+        {
+            HistorySyncStore store = LoadHistorySyncStore();
+            if (store == null || store.Entries == null)
+            {
+                return 0;
+            }
+
+            int count = 0;
+            foreach (HistorySyncEntry entry in store.Entries)
+            {
+                if (IsHistorySyncPair(entry, providerA, providerB))
+                {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        private static bool IsHistorySyncPair(HistorySyncEntry entry, string providerA, string providerB)
+        {
+            if (entry == null)
+            {
+                return false;
+            }
+
+            bool forward = String.Equals(entry.SourceProvider, providerA, StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(entry.TargetProvider, providerB, StringComparison.OrdinalIgnoreCase);
+            bool backward = String.Equals(entry.SourceProvider, providerB, StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(entry.TargetProvider, providerA, StringComparison.OrdinalIgnoreCase);
+            return forward || backward;
+        }
+
         private static List<HistoryThreadRow> QueryProviderThreads(SQLiteDatabase db, string sourceProvider)
         {
             var rows = new List<HistoryThreadRow>();
@@ -1948,6 +2080,7 @@ namespace CodexSiteLauncher
                     rows.Add(new HistoryThreadRow
                     {
                         Id = stmt.ColumnText(0),
+                        ModelProvider = sourceProvider,
                         RolloutPath = stmt.ColumnText(1),
                         Title = stmt.ColumnText(2),
                         UpdatedAt = stmt.ColumnInt64(3),
@@ -2084,6 +2217,165 @@ namespace CodexSiteLauncher
             }
         }
 
+        private static int RefreshHistorySyncPairs(string statePath, HistorySyncStore store, string providerA, string providerB, bool preferNewest)
+        {
+            if (String.IsNullOrWhiteSpace(statePath) || store == null || store.Entries == null || store.Entries.Count == 0)
+            {
+                return 0;
+            }
+
+            int refreshed = 0;
+            using (var db = new SQLiteDatabase(statePath))
+            {
+                List<string> threadColumns = GetTableColumns(db, "threads");
+                List<string> childTables = GetThreadChildTables(db);
+
+                db.Execute("BEGIN IMMEDIATE TRANSACTION");
+                try
+                {
+                    foreach (HistorySyncEntry entry in store.Entries)
+                    {
+                        bool include = preferNewest
+                            ? IsHistorySyncPair(entry, providerA, providerB)
+                            : String.Equals(entry.SourceProvider, providerA, StringComparison.OrdinalIgnoreCase) &&
+                                String.Equals(entry.TargetProvider, providerB, StringComparison.OrdinalIgnoreCase);
+                        if (!include)
+                        {
+                            continue;
+                        }
+
+                        HistoryThreadRow original = QueryThreadById(db, entry.OriginalId);
+                        HistoryThreadRow duplicate = QueryThreadById(db, entry.DuplicateId);
+                        if (original == null || duplicate == null)
+                        {
+                            continue;
+                        }
+
+                        HistoryThreadRow source = original;
+                        HistoryThreadRow target = duplicate;
+                        if (preferNewest && duplicate.UpdatedAt > original.UpdatedAt)
+                        {
+                            source = duplicate;
+                            target = original;
+                        }
+
+                        if (RefreshThreadPair(db, threadColumns, childTables, source, target))
+                        {
+                            refreshed++;
+                        }
+                    }
+
+                    db.Execute("COMMIT");
+                }
+                catch
+                {
+                    try { db.Execute("ROLLBACK"); } catch { }
+                    throw;
+                }
+            }
+
+            return refreshed;
+        }
+
+        private static HistoryThreadRow QueryThreadById(SQLiteDatabase db, string id)
+        {
+            if (String.IsNullOrWhiteSpace(id))
+            {
+                return null;
+            }
+
+            using (SQLiteStatement stmt = db.Prepare(
+                "SELECT id, model_provider, rollout_path, title, updated_at, archived FROM threads WHERE id = @id LIMIT 1"))
+            {
+                stmt.BindText("@id", id);
+                int rc = stmt.Step();
+                if (rc == SQLiteNative.Done)
+                {
+                    return null;
+                }
+                if (rc != SQLiteNative.Row)
+                {
+                    throw new InvalidOperationException(db.ErrorMessage());
+                }
+
+                return new HistoryThreadRow
+                {
+                    Id = stmt.ColumnText(0),
+                    ModelProvider = stmt.ColumnText(1),
+                    RolloutPath = stmt.ColumnText(2),
+                    Title = stmt.ColumnText(3),
+                    UpdatedAt = stmt.ColumnInt64(4),
+                    Archived = (int)stmt.ColumnInt64(5)
+                };
+            }
+        }
+
+        private static bool RefreshThreadPair(SQLiteDatabase db, List<string> threadColumns, List<string> childTables, HistoryThreadRow source, HistoryThreadRow target)
+        {
+            string sourcePath = NormalizeFileSystemPath(source.RolloutPath);
+            string targetPath = NormalizeFileSystemPath(target.RolloutPath);
+            if (String.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath) || String.IsNullOrWhiteSpace(targetPath))
+            {
+                return false;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
+            CopyRolloutFile(sourcePath, targetPath, source.Id, target.Id, source.ModelProvider, target.ModelProvider);
+            UpdateThreadFromSource(db, threadColumns, source.Id, target.Id, target.RolloutPath, target.ModelProvider);
+            foreach (string table in childTables)
+            {
+                ReplaceThreadChildCopies(db, table, source.Id, target.Id);
+            }
+            return true;
+        }
+
+        private static void UpdateThreadFromSource(SQLiteDatabase db, List<string> columns, string sourceId, string targetId, string targetRolloutPath, string targetProvider)
+        {
+            var assignments = new List<string>();
+            foreach (string column in columns)
+            {
+                if (String.Equals(column, "id", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (String.Equals(column, "rollout_path", StringComparison.OrdinalIgnoreCase))
+                {
+                    assignments.Add(QuoteIdentifier(column) + " = @targetRolloutPath");
+                }
+                else if (String.Equals(column, "model_provider", StringComparison.OrdinalIgnoreCase))
+                {
+                    assignments.Add(QuoteIdentifier(column) + " = @targetProvider");
+                }
+                else
+                {
+                    assignments.Add(QuoteIdentifier(column) + " = (SELECT " + QuoteIdentifier(column) +
+                        " FROM " + QuoteIdentifier("threads") + " WHERE id = @sourceId)");
+                }
+            }
+
+            string sql = "UPDATE " + QuoteIdentifier("threads") + " SET " + String.Join(", ", assignments.ToArray()) +
+                " WHERE id = @targetId";
+            using (SQLiteStatement stmt = db.Prepare(sql))
+            {
+                stmt.BindText("@sourceId", sourceId);
+                stmt.BindText("@targetId", targetId);
+                stmt.BindText("@targetRolloutPath", targetRolloutPath);
+                stmt.BindText("@targetProvider", targetProvider);
+                stmt.Execute();
+            }
+        }
+
+        private static void ReplaceThreadChildCopies(SQLiteDatabase db, string table, string sourceId, string targetId)
+        {
+            using (SQLiteStatement stmt = db.Prepare("DELETE FROM " + QuoteIdentifier(table) + " WHERE thread_id = @targetId"))
+            {
+                stmt.BindText("@targetId", targetId);
+                stmt.Execute();
+            }
+
+            InsertThreadChildCopies(db, table, sourceId, targetId);
+        }
+
         private static string FindCurrentStateDatabase()
         {
             string codexHome = GetCodexHomeDirectory();
@@ -2192,6 +2484,11 @@ namespace CodexSiteLauncher
 
         private static int RewriteSessionIndexForHistorySync(string sessionIndexPath, HistorySyncStore store)
         {
+            return RewriteSessionIndexForHistorySync(sessionIndexPath, store, false);
+        }
+
+        private static int RewriteSessionIndexForHistorySync(string sessionIndexPath, HistorySyncStore store, bool preferNewest)
+        {
             if (String.IsNullOrWhiteSpace(sessionIndexPath) || !File.Exists(sessionIndexPath) ||
                 store == null || store.Entries == null || store.Entries.Count == 0)
             {
@@ -2246,17 +2543,27 @@ namespace CodexSiteLauncher
                     continue;
                 }
 
-                output.Add(SerializeSessionIndexRecord(serializer, record));
                 if (String.IsNullOrWhiteSpace(record.Id))
                 {
+                    output.Add(SerializeSessionIndexRecord(serializer, record));
                     continue;
                 }
 
                 List<HistorySyncEntry> entries;
                 if (!entriesByOriginal.TryGetValue(record.Id, out entries))
                 {
+                    output.Add(SerializeSessionIndexRecord(serializer, record));
                     continue;
                 }
+
+                SessionIndexRecord template = ChooseSessionIndexTemplate(record, entries, byId, preferNewest);
+                string originalProvider = GetJsonStringValue(record.Data, "model_provider");
+                string originalPath = GetJsonStringValue(record.Data, "rollout_path");
+                output.Add(serializer.Serialize(BuildSessionIndexCopy(
+                    template.Data,
+                    record.Id,
+                    String.IsNullOrWhiteSpace(originalProvider) ? entries[0].SourceProvider : originalProvider,
+                    originalPath)));
 
                 foreach (HistorySyncEntry entry in entries)
                 {
@@ -2265,8 +2572,9 @@ namespace CodexSiteLauncher
                         continue;
                     }
 
+                    SessionIndexRecord entryTemplate = ChooseSessionIndexTemplate(byId[entry.OriginalId], entry, byId, preferNewest);
                     Dictionary<string, object> copy = BuildSessionIndexCopy(
-                        byId[entry.OriginalId].Data,
+                        entryTemplate.Data,
                         entry.DuplicateId,
                         entry.TargetProvider,
                         entry.DuplicatePath);
@@ -2286,8 +2594,9 @@ namespace CodexSiteLauncher
                     continue;
                 }
 
+                SessionIndexRecord fallbackTemplate = ChooseSessionIndexTemplate(byId[entry.OriginalId], entry, byId, preferNewest);
                 Dictionary<string, object> copy = BuildSessionIndexCopy(
-                    byId[entry.OriginalId].Data,
+                    fallbackTemplate.Data,
                     entry.DuplicateId,
                     entry.TargetProvider,
                     entry.DuplicatePath);
@@ -2298,6 +2607,104 @@ namespace CodexSiteLauncher
 
             File.WriteAllText(sessionIndexPath, String.Join(Environment.NewLine, output.ToArray()) + Environment.NewLine, Utf8NoBom);
             return synced;
+        }
+
+        private static SessionIndexRecord ChooseSessionIndexTemplate(
+            SessionIndexRecord original,
+            List<HistorySyncEntry> entries,
+            Dictionary<string, SessionIndexRecord> byId,
+            bool preferNewest)
+        {
+            SessionIndexRecord best = original;
+            if (!preferNewest || entries == null)
+            {
+                return best;
+            }
+
+            foreach (HistorySyncEntry entry in entries)
+            {
+                best = ChooseSessionIndexTemplate(best, entry, byId, true);
+            }
+            return best;
+        }
+
+        private static SessionIndexRecord ChooseSessionIndexTemplate(
+            SessionIndexRecord original,
+            HistorySyncEntry entry,
+            Dictionary<string, SessionIndexRecord> byId,
+            bool preferNewest)
+        {
+            if (!preferNewest || entry == null || byId == null || String.IsNullOrWhiteSpace(entry.DuplicateId))
+            {
+                return original;
+            }
+
+            SessionIndexRecord duplicate;
+            if (!byId.TryGetValue(entry.DuplicateId, out duplicate) || duplicate == null || duplicate.Data == null)
+            {
+                return original;
+            }
+
+            long originalUpdated = GetSessionIndexUpdatedValue(original == null ? null : original.Data);
+            long duplicateUpdated = GetSessionIndexUpdatedValue(duplicate.Data);
+            return duplicateUpdated > originalUpdated ? duplicate : original;
+        }
+
+        private static long GetSessionIndexUpdatedValue(Dictionary<string, object> data)
+        {
+            if (data == null)
+            {
+                return 0;
+            }
+
+            object value;
+            if (data.TryGetValue("updated_at_ms", out value))
+            {
+                return ConvertJsonLong(value);
+            }
+            if (data.TryGetValue("updated_at", out value))
+            {
+                long number = ConvertJsonLong(value);
+                if (number > 0)
+                {
+                    return number;
+                }
+
+                DateTime parsed;
+                if (DateTime.TryParse(Convert.ToString(value), out parsed))
+                {
+                    return parsed.ToUniversalTime().Ticks;
+                }
+            }
+            return 0;
+        }
+
+        private static long ConvertJsonLong(object value)
+        {
+            if (value == null)
+            {
+                return 0;
+            }
+
+            try
+            {
+                return Convert.ToInt64(value);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static string GetJsonStringValue(Dictionary<string, object> data, string key)
+        {
+            if (data == null)
+            {
+                return null;
+            }
+
+            object value;
+            return data.TryGetValue(key, out value) ? Convert.ToString(value) : null;
         }
 
         private static List<SessionIndexRecord> LoadSessionIndexRecords(string sessionIndexPath)
